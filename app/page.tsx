@@ -436,7 +436,7 @@ export default function Home() {
                 <h2 className="text-2xl font-bold text-[#2F2F2F]">Extraction history</h2>
                 <p className="mt-2 text-sm text-[#4A4A4A]">Filter saved records by file, year, or week.</p>
               </div>
-              <div className="grid gap-3 sm:grid-cols-[1fr_1fr_1fr]">
+              <div className="grid gap-3 sm:grid-cols-[1fr_1fr_1fr_1fr]">
                 <input
                   value={historySearch}
                   onChange={(event) => setHistorySearch(event.target.value)}
@@ -463,6 +463,13 @@ export default function Home() {
                     <option key={week} value={week}>{week}</option>
                   ))}
                 </select>
+                <button
+                  type="button"
+                  onClick={clearHistory}
+                  className="rounded-full bg-[#E57200] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#f36f21]"
+                >
+                  Clear history
+                </button>
               </div>
             </div>
             <div className="overflow-x-auto rounded-[32px] bg-white ring-1 ring-black/5">
