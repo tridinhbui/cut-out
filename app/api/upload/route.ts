@@ -28,7 +28,6 @@ function isFile(item: FormDataEntryValue): item is File {
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
-    const mode = formData.get('mode')?.toString() === 'weekly' ? 'weekly' : 'monthly';
     const rawFiles = formData.getAll('files').length ? formData.getAll('files') : formData.getAll('file');
     const files = rawFiles.filter(isFile);
     if (!files.length) {
@@ -40,11 +39,10 @@ export async function POST(request: NextRequest) {
     for (const file of files) {
       const buffer = Buffer.from(await file.arrayBuffer());
       const workbook = XLSX.read(buffer, { type: 'buffer' });
-      const sheetName = mode === 'weekly' ? 'WKparts' : 'WKrpt';
-      const sheet = workbook.Sheets[sheetName];
+      const sheet = workbook.Sheets['WKparts'];
 
       if (!sheet) {
-        allResults.push({ file: file.name, mode, error: `Sheet ${sheetName} not found` });
+        allResults.push({ file: file.name, error: `Sheet WKparts not found` });
         continue;
       }
 
@@ -61,171 +59,89 @@ export async function POST(request: NextRequest) {
       }
 
       if (targetRow === -1) {
-        allResults.push({ file: file.name, mode, error: `Row '${TARGET_LABEL}' not found` });
+        allResults.push({ file: file.name, error: `Row '${TARGET_LABEL}' not found` });
         continue;
       }
 
-      const maxCol = json[0]?.length || 0;
+      const WEEK5_COLS = ['BA', 'BR', 'CI', 'CZ', 'DQ'];
       const results: any[] = [];
 
-      if (mode === 'weekly') {
-        const weekCols: string[] = [];
-        for (let colIdx = 0; colIdx < maxCol; colIdx++) {
-          const header = normalizeText(json[0]?.[colIdx]);
-          if (header.includes('week')) {
-            weekCols.push(XLSX.utils.encode_col(colIdx));
+      function parseDateCell(cell: any): Date | null {
+        if (typeof cell === 'number' && cell > 40000) {
+          return excelDateToDate(cell);
+        }
+
+        if (typeof cell === 'string') {
+          const trimmed = cell.trim();
+          if (!trimmed) return null;
+
+          const parsed = Date.parse(trimmed);
+          if (!Number.isNaN(parsed)) {
+            return new Date(parsed);
+          }
+
+          const isoMatch = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/.exec(trimmed);
+          if (isoMatch) {
+            const month = Number(isoMatch[1]);
+            const day = Number(isoMatch[2]);
+            const year = Number(isoMatch[3].length === 2 ? `20${isoMatch[3]}` : isoMatch[3]);
+            return new Date(year, month - 1, day);
           }
         }
 
-        const HARD_WEEK_COLS = ['D', 'AM', 'BV', 'DE', 'FW'];
-        const selectedCols = weekCols.length ? weekCols : HARD_WEEK_COLS;
+        return null;
+      }
 
-        function findWeekInfo(colLetter: string) {
-          const colIdx = XLSX.utils.decode_col(colLetter);
-          const header = json[0]?.[colIdx]?.toString() || '';
-          const period = header || `Week ${colLetter}`;
+      function getYearAndMonthFromHeader() {
+        const moEndRaw = json[3]?.[1];
+        const monthNameRaw = json[4]?.[1];
+        const moEndDate = parseDateCell(moEndRaw);
+        const year = moEndDate ? String(moEndDate.getFullYear()) : 'NaN';
+        const month = monthNameRaw ? String(monthNameRaw).toString() : 'N/A';
+        return { year, month };
+      }
 
-          let date: Date | null = null;
-          let dateCell: string | null = null;
-          let wkCode: any = null;
+      function findWeekInfo(valueColLetter: string, dateColLetter: string) {
+        const valueColIdx = XLSX.utils.decode_col(valueColLetter);
+        const dateColIdx = XLSX.utils.decode_col(dateColLetter);
+        const dateRaw = json[3]?.[dateColIdx];
+        const date = parseDateCell(dateRaw);
 
-          for (let row = 0; row < 10; row++) {
-            const cell = json[row]?.[colIdx];
-            if (typeof cell === 'number' && cell > 40000) {
-              date = excelDateToDate(cell);
-              dateCell = `${colLetter}${row + 1}`;
-              break;
-            }
-          }
-
-          for (let row = 0; row < 12; row++) {
-            const cell = json[row]?.[colIdx];
-            if (typeof cell === 'number' && cell > 1000 && cell < 9999 && !(cell > 40000)) {
-              wkCode = cell;
-              break;
-            }
-          }
-
-          return {
-            type: 'Weekly',
-            date_cell: dateCell,
-            date: date ? date.toISOString().split('T')[0] : null,
-            period: date ? `Week ending ${date.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' })}` : period,
-            wk_code: wkCode,
-          };
-        }
-
-        for (let i = 0; i < selectedCols.length; i++) {
-          const colLetter = selectedCols[i];
-          const colIdx = XLSX.utils.decode_col(colLetter);
-          const cellAddr = `${colLetter}${targetRow + 1}`;
-          const rawValue = json[targetRow]?.[colIdx];
-          const value = parseValue(rawValue);
-          const info = findWeekInfo(colLetter);
-
-          results.push({
-            block: i + 1,
-            column: colLetter,
-            cell: cellAddr,
-            value,
-            ...info,
-          });
-        }
-      } else {
-        const blockValueCols: string[] = [];
-        for (let colIdx = 0; colIdx < maxCol; colIdx++) {
-          const r2 = normalizeText(json[1]?.[colIdx]);
-          const r3 = normalizeText(json[2]?.[colIdx]);
-          const r6 = normalizeText(json[5]?.[colIdx]);
-          if (r2.includes('total') && r3.includes('sfi') && r6.includes('overall')) {
-            blockValueCols.push(XLSX.utils.encode_col(colIdx));
+        let wkCode: any = null;
+        for (let row = 0; row < 20; row++) {
+          const cell = json[row]?.[valueColIdx];
+          if (typeof cell === 'number' && cell > 1000 && cell < 9999 && !(cell > 40000)) {
+            wkCode = cell;
+            break;
           }
         }
 
-        const HARDCODED_COLS = ['D', 'AM', 'BV', 'DE', 'FW'];
-        if (!blockValueCols.length) {
-          blockValueCols.push(...HARDCODED_COLS);
-        }
+        return { date, wk_code: wkCode };
+      }
 
-        function findDateForBlock(valueCol: string) {
-          const valueColIdx = XLSX.utils.decode_col(valueCol);
-          if (valueCol === blockValueCols[0]) {
-            const serial = json[3]?.[1];
-            const monthStr = json[4]?.[1];
-            if (typeof serial === 'number') {
-              const date = excelDateToDate(serial);
-              return {
-                type: 'Monthly',
-                date_cell: 'B4',
-                date: date ? date.toISOString().split('T')[0] : null,
-                period: monthStr ? `${monthStr} (month-end)` : (date ? `${date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}` : null),
-                wk_code: null,
-              };
-            }
-            return { type: 'Monthly', date_cell: 'B4', date: null, period: monthStr, wk_code: null };
-          }
+      const { year, month } = getYearAndMonthFromHeader();
+      const DATE_COLS = ['BD', 'BU', 'CL', 'DC', 'DT'];
 
-          let wkLabelCol = -1;
-          for (let ci = valueColIdx - 1; ci >= Math.max(valueColIdx - 30, 0); ci--) {
-            const cellVal = normalizeText(json[3]?.[ci]);
-            if (cellVal.includes('wk ending')) {
-              wkLabelCol = ci;
-              break;
-            }
-          }
+      for (let i = 0; i < WEEK5_COLS.length; i++) {
+        const valueCol = WEEK5_COLS[i];
+        const dateCol = DATE_COLS[i];
+        const colIdx = XLSX.utils.decode_col(valueCol);
+        const rawValue = json[130]?.[colIdx];
+        const value = parseValue(rawValue);
+        const info = findWeekInfo(valueCol, dateCol);
+        const wkEnding = info.date ? info.date.toISOString().split('T')[0] : 'N/A';
 
-          if (wkLabelCol === -1) {
-            return { type: 'Weekly', date_cell: null, date: null, period: null, wk_code: null };
-          }
-
-          let dateCol = -1;
-          for (let ci = wkLabelCol + 1; ci < wkLabelCol + 10 && ci < maxCol; ci++) {
-            const cellVal = json[3]?.[ci];
-            if (typeof cellVal === 'number' && cellVal > 40000) {
-              dateCol = ci;
-              break;
-            }
-          }
-
-          if (dateCol === -1) {
-            return { type: 'Weekly', date_cell: null, date: null, period: null, wk_code: null };
-          }
-
-          const serial = json[3]?.[dateCol];
-          const wkCode = json[4]?.[dateCol];
-          const date = excelDateToDate(serial);
-          const colLtr = XLSX.utils.encode_col(dateCol);
-
-          return {
-            type: 'Weekly',
-            date_cell: `${colLtr}4`,
-            date: date ? date.toISOString().split('T')[0] : null,
-            period: date ? `Week ending ${date.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' })}` : null,
-            wk_code: wkCode,
-          };
-        }
-
-        for (let i = 0; i < blockValueCols.length; i++) {
-          const colLetter = blockValueCols[i];
-          const colIdx = XLSX.utils.decode_col(colLetter);
-          const cellAddr = `${colLetter}${targetRow + 1}`;
-          const rawValue = json[targetRow]?.[colIdx];
-          const value = parseValue(rawValue);
-          const info = findDateForBlock(colLetter);
-
-          results.push({
-            block: i + 1,
-            column: colLetter,
-            cell: cellAddr,
-            value,
-            ...info,
-          });
-        }
+        results.push({
+          year,
+          month,
+          week: String(i + 1),
+          wk_ending: wkEnding,
+          value: value !== null ? value : 'NaN',
+        });
       }
 
       allResults.push({
         file: file.name,
-        mode,
         timestamp: new Date().toISOString(),
         data: results,
       });
